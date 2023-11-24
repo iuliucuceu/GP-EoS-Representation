@@ -47,8 +47,8 @@ class EoS_family:
         eos = log_EoS(pressure, energy_density, phi, unit_system)
         self.eos_list.append(eos)
 
-    def read_tabulated_eos(self, file_path):
-        # Always log10() all data
+    def check_file_format_and_units(self, file_path):
+        # Check if the file is tabulated or not
         with open(file_path, 'r') as file:
             first_line = file.readline().strip()
             if not first_line:
@@ -58,21 +58,25 @@ class EoS_family:
                 unit_parts = first_line.split(' ')
                 if len(unit_parts) != 4 or unit_parts[0] != 'p' or unit_parts[2] != 'mu' or '[' not in unit_parts[1] or '[' not in unit_parts[3]:
                     raise ValueError("The first line format is incorrect. Expected format: 'p [units] mu [units]'")
-
                 pressure_unit = unit_parts[1][unit_parts[1].find('[')+1 : unit_parts[1].find(']')]
                 energy_density_unit = unit_parts[3][unit_parts[3].find('[')+1 : unit_parts[3].find(']')]
-
-                pressure = []
-                energy_density = []
-                for line in file:
-                    p, mu = line.split()
-                    pressure.append(float(p))
-                    energy_density.append(float(mu))
-            
-                self.add_eos(np.log10(pressure), np.log10(energy_density), unit_system={'p': pressure_unit, 'mu': energy_density_unit})
-
+                return pressure_unit, energy_density_unit
             except IndexError:
                 raise ValueError("The first line of the file does not contain the expected unit information.")
+
+    def read_tabulated_eos(self, file_path):
+        pressure_unit, energy_density_unit = self.check_file_format_and_units(file_path)
+        with open(file_path, 'r') as file:
+            # Skip the first line
+            file.readline()
+            pressure = []
+            energy_density = []
+            for line in file:
+                p, mu = line.split()
+                pressure.append(float(p))
+                energy_density.append(float(mu))
+            # Always log10() all data
+            self.add_eos(np.log10(pressure), np.log10(energy_density), unit_system={'p': pressure_unit, 'mu': energy_density_unit})
 
     def convert_units(self, eos_index, target_unit_system, convert_density=False):
         # Only tested for SI -> CGS, FIXME
