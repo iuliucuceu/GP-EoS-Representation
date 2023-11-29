@@ -16,21 +16,22 @@ conversion_dict = {'pressure': {'cgs': C_SI ** 4. / G_SI * 10., 'si': C_SI ** 4.
                    'tidal_deformability': {'geom': 1.}}
 
 class log_EoS:
-    # All numerical data is stored as log10()
+    # All numerical data is stored in SI as log10() and 1/C_SI^2
     def __init__(self, pressure, energy_density, phi=None, unit_system={'p': 'si', 'mu': 'si', 'rho': 'si'}):
-        self.pressure = torch.tensor(pressure, dtype=torch.float64)
-        self.energy_density = torch.tensor(energy_density, dtype=torch.float64)
+        self.pressure = torch.tensor(pressure - 2*np.log10(C_CGS), dtype=torch.float64)
+        self.energy_density = torch.tensor(energy_density - 2*np.log10(C_CGS), dtype=torch.float64)
         self.phi = torch.tensor(phi, dtype=torch.float64) if phi is not None else None
         self.unit_system = unit_system
-        self.calculate_density()
+        # self.calculate_density()
         self.calculate_phi()
+        self.mask = self.pressure > 10
         
-    def calculate_density(self):
+    def calculate_density(self): #FIXME
         # Compute the density (assuming energy density = rest mass energy density + internal energy)
         # and that rest mass energy density dominates (approximation)
         # Units will always be in cgs, so convert energy density (temporary) to cgs first
         if self.unit_system['mu'] == 'si':
-            e_d = self.energy_density + np.log10(conversion_dict['energy_density']['cgs'])
+            e_d = self.energy_density + 2*np.log10(C_CGS) + np.log10(conversion_dict['energy_density']['cgs'])
             self.density = e_d - np.log10(C_CGS ** 2.)
         elif self.unit_system['mu'] == 'cgs':
             self.density = self.energy_density - np.log10(C_CGS ** 2.)
@@ -44,7 +45,9 @@ class EoS_family:
         self.eos_list = []
 
     def add_eos(self, pressure, energy_density, phi=None, unit_system={'p': 'si', 'mu': 'si', 'rho': 'si'}):
-        eos = log_EoS(pressure, energy_density, phi, unit_system)
+        # Add a new EoS to the family and convert from geom to si
+        pressure, energy_density = self.convert_units(pressure, energy_density)
+        eos = log_EoS(pressure, energy_density, phi, unit_system={'p': 'si', 'mu': 'si', 'rho': 'si'})
         self.eos_list.append(eos)
 
     def check_file_format_and_units(self, file_path):
@@ -65,6 +68,7 @@ class EoS_family:
                 raise ValueError("The first line of the file does not contain the expected unit information.")
 
     def read_tabulated_eos(self, file_path):
+        # All data is saved as log10
         pressure_unit, energy_density_unit = self.check_file_format_and_units(file_path)
         with open(file_path, 'r') as file:
             # Skip the first line
@@ -75,25 +79,11 @@ class EoS_family:
                 p, mu = line.split()
                 pressure.append(float(p))
                 energy_density.append(float(mu))
-            # Always log10() all data
             self.add_eos(np.log10(pressure), np.log10(energy_density), unit_system={'p': pressure_unit, 'mu': energy_density_unit})
 
-    def convert_units(self, eos_index, target_unit_system, convert_density=False):
-        # Only tested for SI -> CGS, FIXME
-        # Validate target unit system
-        valid_unit_systems = ['si', 'cgs', 'geom']
-        if target_unit_system not in valid_unit_systems:
-            raise ValueError(f"Invalid target unit system. Valid options are: {', '.join(valid_unit_systems)}")
-        if (target_unit_system == self.eos_list[eos_index].unit_system['p'] and 
-            target_unit_system == self.eos_list[eos_index].unit_system['mu']):
-            print("The pressure and energy density are already in the target unit system.")
-            return
-        if convert_density and target_unit_system == self.eos_list[eos_index].unit_system['rho']:
-            print("The density is already in the target unit system.")
-            return
-
-        eos = self.eos_list[eos_index]
-
+    def convert_units(self, pressure, energy_density):
+        # geom -> CGS
+        target_unit_system = 'cgs'
         # Convert pressure and energy density
         conversion_factors = {
             'pressure': conversion_dict['pressure'][target_unit_system],
@@ -101,17 +91,37 @@ class EoS_family:
             'density': conversion_dict['density'][target_unit_system]
         }
 
-        eos.pressure = eos.pressure + np.log10(conversion_factors['pressure'])
-        eos.energy_density = eos.energy_density + np.log10(conversion_factors['energy_density'])
-        if convert_density:
-            eos.density = eos.density + np.log10(conversion_factors['density'])
+        pressure = pressure + np.log10(conversion_factors['pressure'])
+        energy_density = energy_density + np.log10(conversion_factors['energy_density'])
+        return pressure, energy_density
 
-        # Update the unit system
-        eos.unit_system = target_unit_system
+    def EoS_fitting(self, eos_index, n=3):
+        # Fit a polynomial to the log(p) vs log(μ) data above log(p) = 10
+        eos = self.eos_list[eos_index]
+        coef = np.polyfit(eos.pressure[eos.mask], eos.energy_density[eos.mask], n)
+        return coef
 
-    def EoS_fitting(self):
-        pass
+    def get_residuals(self, eos_index, n=3):
+        # Get the residuals of the polynomial fit
+        eos = self.eos_list[eos_index]
+        coef = self.EoS_fitting(eos_index, n)
+        residuals = (10.**eos.energy_density[eos.mask] - 10.**(np.polyval(coef, eos.pressure[eos.mask]))) / 10.**np.polyval(coef, eos.pressure[eos.mask])
+        return residuals
 
+    def plot_residuals(self, eos_index, n=3):
+        eos = self.eos_list[eos_index]
+        residuals = self.get_residuals(eos_index, n)
+        plt.plot(eos.pressure[eos.mask], residuals, 'x', markersize=1, color='red')
+        plt.xlabel('log(p)')
+        plt.ylabel('Residuals')
+        plt.show()
 
-
-    # Additional methods for handling tensors can be added here
+    def plot_eos(self, eos_index, n=3):
+        eos = self.eos_list[eos_index]
+        coef = self.EoS_fitting(eos_index, n)
+        plt.plot(eos.pressure[eos.mask], eos.energy_density[eos.mask], '.', label='EoS', color='red', markersize=10)
+        plt.plot(eos.pressure[eos.mask], np.polyval(coef, eos.pressure[eos.mask]) , label='Fit')
+        plt.xlabel('log(p)')
+        plt.ylabel('log(μ)')
+        plt.legend()
+        plt.show()
